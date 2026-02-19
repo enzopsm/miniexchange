@@ -1,0 +1,35 @@
+# 2026/02/19 12:56:36.284214 [TestProperty_ExpirationStateTransition] [rapid] draw isBid: false
+# 2026/02/19 12:56:36.284252 [TestProperty_ExpirationStateTransition] [rapid] draw price: 100
+# 2026/02/19 12:56:36.284263 [TestProperty_ExpirationStateTransition] [rapid] draw qty: 2
+# 2026/02/19 12:56:36.284272 [TestProperty_ExpirationStateTransition] [rapid] draw numOrders: 2
+# 2026/02/19 12:56:36.284278 [TestProperty_ExpirationStateTransition] [rapid] draw doPartialFill: true
+# 2026/02/19 12:56:36.284294 [TestProperty_ExpirationStateTransition] [rapid] draw pastOffset-0: 1
+# 2026/02/19 12:56:36.284304 [TestProperty_ExpirationStateTransition] [rapid] draw fillQty-0: 1
+# 2026/02/19 12:56:36.284342 [TestProperty_ExpirationStateTransition] [rapid] draw pastOffset-1: 1
+# 2026/02/19 12:56:36.284352 [TestProperty_ExpirationStateTransition] [rapid] draw fillQty-1: 1
+# 2026/02/19 12:56:36.284388 [TestProperty_ExpirationStateTransition] order-0: expected status=expired, got filled
+# 
+v0.4.8#17773246399113685954
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x1
+0x1
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0

@@ -1,0 +1,14 @@
+# 2026/02/19 12:41:13.576319 [TestProperty_CancellationStateTransition] [rapid] draw isBid: true
+# 2026/02/19 12:41:13.576361 [TestProperty_CancellationStateTransition] [rapid] draw price: 100
+# 2026/02/19 12:41:13.576375 [TestProperty_CancellationStateTransition] [rapid] draw qty: 1
+# 2026/02/19 12:41:13.576384 [TestProperty_CancellationStateTransition] [rapid] draw doPartialFill: true
+# 
+v0.4.8#643696673006604506
+0x1
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
