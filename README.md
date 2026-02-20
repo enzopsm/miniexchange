@@ -38,269 +38,378 @@ make test
 
 This runs `go test -race -count=1 ./...` — all unit tests, property-based tests, and integration tests with the race detector enabled.
 
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/brokers` | Register a new broker with initial cash and optional stock holdings. Required before submitting orders. |
+| `GET` | `/brokers/{broker_id}/balance` | Current broker balance: cash, reserved cash, holdings, and reserved quantities. *(Extension: broker balance)* |
+| `GET` | `/brokers/{broker_id}/orders` | Paginated list of a broker's orders with optional `?status=` filter. |
+| `POST` | `/orders` | Submit a limit or market order. Matching runs synchronously — the response includes any trades. *(Core: order submission. Extension: market orders)* |
+| `GET` | `/orders/{order_id}` | Retrieve full order state including all trades executed against it. *(Core: order status by identifier)* |
+| `DELETE` | `/orders/{order_id}` | Cancel a pending or partially filled order. Releases reservations. |
+| `GET` | `/stocks/{symbol}/price` | VWAP price over the last 5 minutes, with fallback to last trade price. *(Extension: current stock price)* |
+| `GET` | `/stocks/{symbol}/book` | Top-of-book snapshot: aggregated bid/ask levels with `?depth=` control. *(Extension: order book listing)* |
+| `GET` | `/stocks/{symbol}/quote` | Simulate a market order against the current book without placing it. |
+| `POST` | `/webhooks` | Subscribe to event notifications (`trade.executed`, `order.expired`, `order.cancelled`). Upsert semantics. *(Extension: webhook notifications)* |
+| `GET` | `/webhooks` | List webhook subscriptions for a broker (`?broker_id=`). |
+| `DELETE` | `/webhooks/{webhook_id}` | Remove a webhook subscription. |
+| `GET` | `/healthz` | Liveness check. |
+
 ## API Walkthrough
 
-Below is a complete walkthrough you can run with `curl` against a running server. It covers every endpoint and demonstrates the core matching scenarios from the challenge statement.
+A complete walkthrough you can run with `curl` against a running server. Every endpoint is exercised. Copy-paste the blocks in order — each scenario builds on the state left by the previous one.
 
-### 1. Register Brokers
+> **Note:** Replace `{order_id}` and `{webhook_id}` placeholders with actual IDs from previous responses.
+
+### 1. Register brokers (POST /brokers)
 
 ```bash
 # Register a buyer with $100,000 cash
 curl -s -X POST http://localhost:8080/brokers \
   -H "Content-Type: application/json" \
-  -d '{
-    "broker_id": "buyer",
-    "initial_cash": 100000.00
-  }' | jq .
+  -d '{"broker_id":"buyer","initial_cash":100000.00}' | jq .
 
-# Register a seller with AAPL shares
+# Register a seller with 5000 AAPL shares and no cash
 curl -s -X POST http://localhost:8080/brokers \
   -H "Content-Type: application/json" \
-  -d '{
-    "broker_id": "seller",
-    "initial_cash": 0,
-    "initial_holdings": [
-      {"symbol": "AAPL", "quantity": 5000}
-    ]
-  }' | jq .
+  -d '{"broker_id":"seller","initial_cash":0,"initial_holdings":[{"symbol":"AAPL","quantity":5000}]}' | jq .
 ```
 
-### 2. Check Broker Balance
+### 2. Check broker balances (GET /brokers/{broker_id}/balance)
 
 ```bash
+# Buyer: $100,000 cash, no holdings
+curl -s http://localhost:8080/brokers/buyer/balance | jq .
+
+# Seller: $0 cash, 5000 AAPL
+curl -s http://localhost:8080/brokers/seller/balance | jq .
+```
+
+### 3. Limit order — same price match (POST /orders)
+
+```bash
+# Seller asks 100 AAPL @ $150 → rests on book
+curl -s -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -d '{"type":"limit","broker_id":"seller","document_number":"DOC001","side":"ask","symbol":"AAPL","price":150.00,"quantity":100,"expires_at":"2027-01-01T00:00:00Z"}' | jq .
+
+# Buyer bids 100 AAPL @ $150 → matches immediately, trade at $150
+curl -s -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -d '{"type":"limit","broker_id":"buyer","document_number":"DOC002","side":"bid","symbol":"AAPL","price":150.00,"quantity":100,"expires_at":"2027-01-01T00:00:00Z"}' | jq .
+
+# Verify: buyer $85,000 cash + 100 AAPL, seller $15,000 cash + 4900 AAPL
 curl -s http://localhost:8080/brokers/buyer/balance | jq .
 curl -s http://localhost:8080/brokers/seller/balance | jq .
 ```
 
-### 3. Submit Orders and See Matching
-
-
-**Same price match** — seller asks $150, buyer bids $150 → trade at $150:
+### 4. Limit order — price gap match
 
 ```bash
-# Seller places an ask
+# Seller asks 100 AAPL @ $148
 curl -s -X POST http://localhost:8080/orders \
   -H "Content-Type: application/json" \
-  -d '{
-    "type": "limit",
-    "broker_id": "seller",
-    "document_number": "DOC001",
-    "side": "ask",
-    "symbol": "AAPL",
-    "price": 150.00,
-    "quantity": 1000,
-    "expires_at": "2027-01-01T00:00:00Z"
-  }' | jq .
+  -d '{"type":"limit","broker_id":"seller","document_number":"DOC003","side":"ask","symbol":"AAPL","price":148.00,"quantity":100,"expires_at":"2027-01-01T00:00:00Z"}' | jq .
 
-# Buyer places a matching bid → trade executes immediately
+# Buyer bids 100 AAPL @ $150 → matches at seller's price $148
 curl -s -X POST http://localhost:8080/orders \
   -H "Content-Type: application/json" \
-  -d '{
-    "type": "limit",
-    "broker_id": "buyer",
-    "document_number": "DOC002",
-    "side": "bid",
-    "symbol": "AAPL",
-    "price": 150.00,
-    "quantity": 1000,
-    "expires_at": "2027-01-01T00:00:00Z"
-  }' | jq .
+  -d '{"type":"limit","broker_id":"buyer","document_number":"DOC004","side":"bid","symbol":"AAPL","price":150.00,"quantity":100,"expires_at":"2027-01-01T00:00:00Z"}' | jq .
+
+# Verify: buyer $70,200 cash + 200 AAPL, seller $29,800 cash + 4800 AAPL
+curl -s http://localhost:8080/brokers/buyer/balance | jq .
+curl -s http://localhost:8080/brokers/seller/balance | jq .
 ```
 
-The bid response will show `"status": "filled"` with a trade at price `150.00`.
-
-**Price gap** — seller asks $148, buyer bids $150 → trade at $148 (seller's price):
+### 5. Limit order — no match + order book + cancel
 
 ```bash
+# Seller asks 100 AAPL @ $155 → rests on book (pending)
 curl -s -X POST http://localhost:8080/orders \
   -H "Content-Type: application/json" \
-  -d '{
-    "type": "limit",
-    "broker_id": "seller",
-    "document_number": "DOC003",
-    "side": "ask",
-    "symbol": "AAPL",
-    "price": 148.00,
-    "quantity": 500,
-    "expires_at": "2027-01-01T00:00:00Z"
-  }' | jq .
+  -d '{"type":"limit","broker_id":"seller","document_number":"DOC005","side":"ask","symbol":"AAPL","price":155.00,"quantity":100,"expires_at":"2027-01-01T00:00:00Z"}' | jq .
 
+# Buyer bids 100 AAPL @ $150 → no match, rests on book (pending)
 curl -s -X POST http://localhost:8080/orders \
   -H "Content-Type: application/json" \
-  -d '{
-    "type": "limit",
-    "broker_id": "buyer",
-    "document_number": "DOC004",
-    "side": "bid",
-    "symbol": "AAPL",
-    "price": 150.00,
-    "quantity": 500,
-    "expires_at": "2027-01-01T00:00:00Z"
-  }' | jq .
+  -d '{"type":"limit","broker_id":"buyer","document_number":"DOC006","side":"bid","symbol":"AAPL","price":150.00,"quantity":100,"expires_at":"2027-01-01T00:00:00Z"}' | jq .
+
+# Balances unchanged
+curl -s http://localhost:8080/brokers/buyer/balance | jq .
+curl -s http://localhost:8080/brokers/seller/balance | jq .
+
+# View the order book — both orders resting at their price levels (GET /stocks/{symbol}/book)
+curl -s http://localhost:8080/stocks/AAPL/book | jq .
+
+# Custom depth parameter
+curl -s "http://localhost:8080/stocks/AAPL/book?depth=5" | jq .
+
+# Cancel both resting orders to clean up (DELETE /orders/{order_id})
+# Replace {ask_order_id} and {bid_order_id} with order_id values from above
+curl -s -X DELETE http://localhost:8080/orders/{ask_order_id} | jq .
+curl -s -X DELETE http://localhost:8080/orders/{bid_order_id} | jq .
 ```
 
-**No match** — seller asks $155, buyer bids $150 → both rest on book:
+### 6. Limit order — partial fill
 
 ```bash
+# Seller asks 100 AAPL @ $149
 curl -s -X POST http://localhost:8080/orders \
   -H "Content-Type: application/json" \
-  -d '{
-    "type": "limit",
-    "broker_id": "seller",
-    "document_number": "DOC005",
-    "side": "ask",
-    "symbol": "AAPL",
-    "price": 155.00,
-    "quantity": 200,
-    "expires_at": "2027-01-01T00:00:00Z"
-  }' | jq .
+  -d '{"type":"limit","broker_id":"seller","document_number":"DOC007","side":"ask","symbol":"AAPL","price":149.00,"quantity":100,"expires_at":"2027-01-01T00:00:00Z"}' | jq .
 
+# Buyer bids 200 AAPL @ $149 → 100 filled, 100 remaining on book (partially_filled)
 curl -s -X POST http://localhost:8080/orders \
   -H "Content-Type: application/json" \
-  -d '{
-    "type": "limit",
-    "broker_id": "buyer",
-    "document_number": "DOC006",
-    "side": "bid",
-    "symbol": "AAPL",
-    "price": 150.00,
-    "quantity": 200,
-    "expires_at": "2027-01-01T00:00:00Z"
-  }' | jq .
+  -d '{"type":"limit","broker_id":"buyer","document_number":"DOC008","side":"bid","symbol":"AAPL","price":149.00,"quantity":200,"expires_at":"2027-01-01T00:00:00Z"}' | jq .
+
+# Verify: buyer $55,300 cash + 300 AAPL (remaining 100 on book reserving $14,900)
+curl -s http://localhost:8080/brokers/buyer/balance | jq .
+# Seller $44,700 cash + 4700 AAPL
+curl -s http://localhost:8080/brokers/seller/balance | jq .
+
+# Cancel the buyer's partially filled order to clean up — releases the $14,900 reservation
+# Replace {partial_order_id} with the buyer's order_id from above
+curl -s -X DELETE http://localhost:8080/orders/{partial_order_id} | jq .
 ```
 
-Both responses will show `"status": "pending"` with empty `trades` arrays.
-
-**Partial fill** — seller offers 500, buyer wants 1000 → 500 filled, 500 remaining:
+### 7. Retrieve an order (GET /orders/{order_id})
 
 ```bash
-curl -s -X POST http://localhost:8080/orders \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "limit",
-    "broker_id": "seller",
-    "document_number": "DOC007",
-    "side": "ask",
-    "symbol": "AAPL",
-    "price": 149.00,
-    "quantity": 500,
-    "expires_at": "2027-01-01T00:00:00Z"
-  }' | jq .
-
-curl -s -X POST http://localhost:8080/orders \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "limit",
-    "broker_id": "buyer",
-    "document_number": "DOC008",
-    "side": "bid",
-    "symbol": "AAPL",
-    "price": 149.00,
-    "quantity": 1000,
-    "expires_at": "2027-01-01T00:00:00Z"
-  }' | jq .
-```
-
-The bid response will show `"status": "partially_filled"`, `"filled_quantity": 500`, `"remaining_quantity": 500`.
-
-### 4. Market Orders
-
-Market orders execute immediately at the best available prices (IOC semantics):
-
-```bash
-curl -s -X POST http://localhost:8080/orders \
-  -H "Content-Type: application/json" \
-  -d '{
-    "type": "market",
-    "broker_id": "buyer",
-    "document_number": "MKT001",
-    "side": "bid",
-    "symbol": "AAPL",
-    "quantity": 100
-  }' | jq .
-```
-
-If there's liquidity, the response shows the fills. If not, you get `409` with `"error": "no_liquidity"`.
-
-### 5. Retrieve an Order
-
-```bash
+# Fetch full order state including all trades — replace {order_id} with any ID from above
 curl -s http://localhost:8080/orders/{order_id} | jq .
 ```
 
-Replace `{order_id}` with an actual ID from a previous response.
-
-### 6. Cancel an Order
+### 8. List broker orders with filters (GET /brokers/{broker_id}/orders)
 
 ```bash
-curl -s -X DELETE http://localhost:8080/orders/{order_id} | jq .
-```
-
-Only `pending` or `partially_filled` orders can be cancelled. Filled/cancelled/expired orders return `409`.
-
-### 7. List Broker Orders
-
-```bash
-# All orders
+# All orders for the buyer
 curl -s "http://localhost:8080/brokers/buyer/orders" | jq .
 
 # Filter by status
 curl -s "http://localhost:8080/brokers/buyer/orders?status=filled" | jq .
+curl -s "http://localhost:8080/brokers/seller/orders?status=filled" | jq .
+curl -s "http://localhost:8080/brokers/buyer/orders?status=cancelled" | jq .
 
 # Pagination
-curl -s "http://localhost:8080/brokers/buyer/orders?page=1&limit=5" | jq .
+curl -s "http://localhost:8080/brokers/buyer/orders?page=1&limit=2" | jq .
 ```
 
-### 8. Stock Price (VWAP)
+### 9. Market order — full fill (POST /orders with type=market)
 
 ```bash
+# Seller places a resting ask to provide liquidity
+curl -s -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -d '{"type":"limit","broker_id":"seller","document_number":"DOC009","side":"ask","symbol":"AAPL","price":151.00,"quantity":100,"expires_at":"2027-01-01T00:00:00Z"}' | jq .
+
+# Buyer submits a market buy for 100 AAPL → fills immediately at $151
+curl -s -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -d '{"type":"market","broker_id":"buyer","document_number":"MKT001","side":"bid","symbol":"AAPL","quantity":100}' | jq .
+
+# Verify balances
+curl -s http://localhost:8080/brokers/buyer/balance | jq .
+curl -s http://localhost:8080/brokers/seller/balance | jq .
+```
+
+### 10. Market order — no liquidity (409 Conflict)
+
+```bash
+# No asks on the book → market buy is rejected
+curl -s -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -d '{"type":"market","broker_id":"buyer","document_number":"MKT002","side":"bid","symbol":"AAPL","quantity":100}' | jq .
+# Response: 409 with "error": "no_liquidity"
+```
+
+### 11. Stock price — VWAP (GET /stocks/{symbol}/price)
+
+```bash
+# VWAP over the last 5 minutes based on executed trades
 curl -s http://localhost:8080/stocks/AAPL/price | jq .
 ```
 
-Returns the volume-weighted average price over the last 5 minutes (configurable). Falls back to the last trade price if no trades in the window. Returns `null` if no trades ever.
-
-### 9. Order Book
+### 12. Quote simulation (GET /stocks/{symbol}/quote)
 
 ```bash
-# Default depth (10 levels)
-curl -s http://localhost:8080/stocks/AAPL/book | jq .
+# Place some asks to provide liquidity for the quote
+curl -s -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -d '{"type":"limit","broker_id":"seller","document_number":"DOC010","side":"ask","symbol":"AAPL","price":152.00,"quantity":200,"expires_at":"2027-01-01T00:00:00Z"}' | jq .
 
-# Custom depth
-curl -s "http://localhost:8080/stocks/AAPL/book?depth=5" | jq .
+curl -s -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -d '{"type":"limit","broker_id":"seller","document_number":"DOC011","side":"ask","symbol":"AAPL","price":153.00,"quantity":300,"expires_at":"2027-01-01T00:00:00Z"}' | jq .
+
+# Preview a market buy of 400 AAPL without placing it — shows estimated cost and price levels
+curl -s "http://localhost:8080/stocks/AAPL/quote?side=bid&quantity=400" | jq .
+
+# Preview a market sell
+curl -s "http://localhost:8080/stocks/AAPL/quote?side=ask&quantity=100" | jq .
+
+# Clean up the resting asks
+# Replace {ask_id_1} and {ask_id_2} with order_id values from above
+curl -s -X DELETE http://localhost:8080/orders/{ask_id_1} | jq .
+curl -s -X DELETE http://localhost:8080/orders/{ask_id_2} | jq .
 ```
 
-Shows aggregated bid/ask price levels with total quantity and order count per level, plus the spread.
-
-### 10. Quote Simulation
-
-Preview a market order without placing it:
+### 13. Webhooks — subscription CRUD (POST /webhooks, GET /webhooks, DELETE /webhooks/{webhook_id})
 
 ```bash
-curl -s "http://localhost:8080/stocks/AAPL/quote?side=bid&quantity=500" | jq .
-```
-
-Returns estimated average price, total cost, available quantity, and price levels that would be swept.
-
-### 11. Webhooks
-
-```bash
-# Subscribe to trade notifications
+# Subscribe the buyer to trade, expiration, and cancellation notifications
 curl -s -X POST http://localhost:8080/webhooks \
   -H "Content-Type: application/json" \
-  -d '{
-    "broker_id": "buyer",
-    "url": "https://your-server.com/hooks",
-    "events": ["trade.executed", "order.expired", "order.cancelled"]
-  }' | jq .
+  -d '{"broker_id":"buyer","url":"https://example.com/hooks","events":["trade.executed","order.expired","order.cancelled"]}' | jq .
 
-# List subscriptions
+# List the buyer's webhook subscriptions
 curl -s "http://localhost:8080/webhooks?broker_id=buyer" | jq .
 
-# Delete a subscription
+# Delete a specific subscription — replace {webhook_id} with an ID from above
 curl -s -X DELETE http://localhost:8080/webhooks/{webhook_id}
 ```
 
-### 12. Health Check
+### 14. Webhooks — delivery verification (fire-and-forget HTTP POST)
+
+The exchange POSTs event payloads to the broker's registered URL when trades execute, orders expire, or orders are cancelled. This section proves the delivery system works end-to-end.
+
+**Step 1: Get a webhook receiver URL**
+
+Go to [https://webhook.site](https://webhook.site). Copy the unique HTTPS URL shown on the page (e.g., `https://webhook.site/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`). Keep the page open — incoming requests appear in real time.
+
+**Step 2: Subscribe the seller to all events**
+
+Replace `{YOUR_WEBHOOK_SITE_URL}` with the URL you copied.
+
+```bash
+curl -s -X POST http://localhost:8080/webhooks \
+  -H "Content-Type: application/json" \
+  -d '{"broker_id":"seller","url":"{YOUR_WEBHOOK_SITE_URL}","events":["trade.executed","order.expired","order.cancelled"]}' | jq .
+```
+
+**Step 3: Trigger `trade.executed`**
+
+Place a resting ask from the seller, then a matching bid from the buyer. The seller's webhook URL receives a `trade.executed` POST.
+
+```bash
+# Seller asks 50 AAPL @ $160 → rests on book
+curl -s -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -d '{"type":"limit","broker_id":"seller","document_number":"WH001","side":"ask","symbol":"AAPL","price":160.00,"quantity":50,"expires_at":"2027-01-01T00:00:00Z"}' | jq .
+
+# Buyer bids 50 AAPL @ $160 → matches, trade executes
+curl -s -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -d '{"type":"limit","broker_id":"buyer","document_number":"WH002","side":"bid","symbol":"AAPL","price":160.00,"quantity":50,"expires_at":"2027-01-01T00:00:00Z"}' | jq .
+```
+
+Check webhook.site — you should see a POST with headers `X-Event-Type: trade.executed`, `X-Delivery-Id`, and `X-Webhook-Id`, and a JSON body like:
+
+```json
+{
+  "event": "trade.executed",
+  "timestamp": "...",
+  "data": {
+    "trade_id": "...",
+    "broker_id": "seller",
+    "order_id": "...",
+    "symbol": "AAPL",
+    "side": "ask",
+    "trade_price": 160.00,
+    "trade_quantity": 50,
+    "order_status": "filled",
+    "order_filled_quantity": 50,
+    "order_remaining_quantity": 0
+  }
+}
+```
+
+**Step 4: Trigger `order.cancelled`**
+
+Place a resting ask, then cancel it. The seller's webhook URL receives an `order.cancelled` POST.
+
+```bash
+# Seller asks 50 AAPL @ $200 → rests on book
+curl -s -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -d '{"type":"limit","broker_id":"seller","document_number":"WH003","side":"ask","symbol":"AAPL","price":200.00,"quantity":50,"expires_at":"2027-01-01T00:00:00Z"}' | jq .
+
+# Cancel it — replace {order_id} with the order_id from above
+curl -s -X DELETE http://localhost:8080/orders/{order_id} | jq .
+```
+
+Check webhook.site — you should see a POST with `X-Event-Type: order.cancelled` and a body like:
+
+```json
+{
+  "event": "order.cancelled",
+  "timestamp": "...",
+  "data": {
+    "broker_id": "seller",
+    "order_id": "...",
+    "symbol": "AAPL",
+    "side": "ask",
+    "price": 200.00,
+    "quantity": 50,
+    "filled_quantity": 0,
+    "cancelled_quantity": 50,
+    "remaining_quantity": 0,
+    "status": "cancelled"
+  }
+}
+```
+
+**Step 5: Trigger `order.expired`**
+
+Place an order that expires 3 seconds from now. The background expiration sweep (runs every 1s) will expire it and POST to the webhook URL.
+
+```bash
+# Seller asks 50 AAPL @ $200, expiring in 3 seconds
+curl -s -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -d "{\"type\":\"limit\",\"broker_id\":\"seller\",\"document_number\":\"WH004\",\"side\":\"ask\",\"symbol\":\"AAPL\",\"price\":200.00,\"quantity\":50,\"expires_at\":\"$(date -u -v+3S '+%Y-%m-%dT%H:%M:%SZ')\"}" | jq .
+
+# Wait a few seconds for the expiration sweep to run
+sleep 4
+
+# Confirm the order expired
+curl -s http://localhost:8080/brokers/seller/orders?status=expired | jq .
+```
+
+> **Note:** On Linux, replace `-v+3S` with `-d '+3 seconds'`: `$(date -u -d '+3 seconds' '+%Y-%m-%dT%H:%M:%SZ')`
+
+Check webhook.site — you should see a POST with `X-Event-Type: order.expired` and a body like:
+
+```json
+{
+  "event": "order.expired",
+  "timestamp": "...",
+  "data": {
+    "broker_id": "seller",
+    "order_id": "...",
+    "symbol": "AAPL",
+    "side": "ask",
+    "price": 200.00,
+    "quantity": 50,
+    "filled_quantity": 0,
+    "cancelled_quantity": 50,
+    "remaining_quantity": 0,
+    "status": "expired"
+  }
+}
+```
+
+**Step 6: Clean up**
+
+```bash
+# Delete the seller's webhook subscriptions
+curl -s "http://localhost:8080/webhooks?broker_id=seller" | jq -r '.webhooks[].webhook_id' | while read id; do
+  curl -s -X DELETE "http://localhost:8080/webhooks/$id"
+done
+```
+
+### 15. Health check (GET /healthz)
 
 ```bash
 curl -s http://localhost:8080/healthz | jq .

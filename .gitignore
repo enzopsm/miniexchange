@@ -1,8 +1,18 @@
 # Build output
 miniexchange
 
-# Personal notes
+# Personal/working notes
 personal-notes/
+
+# Challenge statement (evaluators already have it)
+challenge_statement/
+
+# AI chat logs
+ai-chats/
+
+# Tooling config
+.kiro/
+.vscode/
 
 # OS files
 .DS_Store
